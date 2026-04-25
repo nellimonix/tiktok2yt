@@ -1,0 +1,7 @@
+client_secret.json
+config.json
+__pycache__/
+bot.log
+state.json
+tmp/
+youtube_token.json

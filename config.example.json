@@ -1,0 +1,21 @@
+{
+  "tiktok_accounts": [
+    "username1",
+    "username2",
+    "username3"
+  ],
+  "nvidia_api_key": "nvapi-XXXXXXXXXXXXXXXXXXXXX",
+  "youtube_client_secret": "client_secret.json",
+  "whisper_model": "base",
+  "check_interval_minutes": 5,
+  "schedule_interval_hours": 2,
+  "initial_videos_per_account": 5,
+  "overlay_text": "Лимонный чай",
+  "overlay_font_size": 52,
+  "overlay_opacity": 0.5,
+  "max_duration_seconds": 179,
+  "youtube_category_id": "1",
+  "youtube_privacy": "private",
+  "temp_dir": "tmp",
+  "log_file": "bot.log"
+}
