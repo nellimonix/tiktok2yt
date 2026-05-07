@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -65,7 +66,22 @@ def get_youtube_service(client_secret_file: str):
             flow = InstalledAppFlow.from_client_secrets_file(
                 client_secret_file, SCOPES
             )
-            creds = flow.run_local_server(port=0, open_browser=True)
+
+            # access_type=offline + prompt=consent гарантируют выдачу refresh_token,
+            # чтобы потом обновлять access без повторной авторизации.
+            try:
+                creds = flow.run_local_server(
+                    port=0,
+                    open_browser=True,
+                    access_type="offline",
+                    prompt="consent",
+                )
+            except webbrowser.Error:
+                logger.info(
+                    "Браузер недоступен — используем консольный режим. "
+                    "Откройте ссылку на машине с браузером и вставьте код сюда."
+                )
+                creds = _run_console_flow(flow)
 
         # Сохраняем токен
         with open(TOKEN_FILE, "w") as f:
@@ -73,6 +89,23 @@ def get_youtube_service(client_secret_file: str):
         logger.info("Токен YouTube сохранён")
 
     return build("youtube", "v3", credentials=creds)
+
+
+def _run_console_flow(flow: InstalledAppFlow) -> Credentials:
+    """OAuth без браузера: пользователь сам открывает ссылку и вставляет код."""
+    flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        include_granted_scopes="true",
+    )
+    print("\n=== YouTube OAuth ===")
+    print("1. Откройте ссылку в браузере (на любой машине):")
+    print(auth_url)
+    print("2. Авторизуйтесь и скопируйте код.")
+    code = input("Вставьте код сюда: ").strip()
+    flow.fetch_token(code=code)
+    return flow.credentials
 
 
 def upload_video(
