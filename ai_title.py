@@ -15,7 +15,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-MODEL = "google/gemma-3-27b-it"
+MODEL = "google/gemma-4-31b-it"
 MAX_RETRIES = 3
 
 SYSTEM_PROMPT = """Ты генератор названий для YouTube Shorts.
