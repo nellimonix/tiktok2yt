@@ -1,6 +1,5 @@
 """
-Модуль генерации названий через NVIDIA API.
-Модель: google/gemma-3-27b-it
+Модуль генерации названий через OpenAI-совместимый API.
 Ответ строго в JSON, с ретраем при ошибке парсинга.
 """
 
@@ -14,8 +13,6 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-MODEL = "google/gemma-4-31b-it"
 MAX_RETRIES = 3
 
 SYSTEM_PROMPT = """Ты генератор названий для YouTube Shorts.
@@ -41,15 +38,24 @@ SYSTEM_PROMPT = """Ты генератор названий для YouTube Short
 def generate_title(
     transcript: str,
     api_key: str,
+    api_url: str,
+    model: Optional[str] = None,
     fallback_title: str = "Интересное видео",
 ) -> str:
     """
     Генерирует название для YouTube Shorts.
     При неудаче парсинга — повторяет до MAX_RETRIES раз.
     При полной неудаче — возвращает fallback_title.
+
+    Если model=None — параметр model не включается в payload (провайдер
+    сам выберет модель по умолчанию).
     """
     if not transcript or len(transcript.strip()) < 5:
         logger.warning("Транскрипция слишком короткая, используем fallback")
+        return fallback_title
+
+    if not api_url:
+        logger.error("api_url не задан, используем fallback")
         return fallback_title
 
     # Обрезаем транскрипцию если слишком длинная
@@ -64,7 +70,6 @@ def generate_title(
         logger.info(f"Генерация названия, попытка {attempt}/{MAX_RETRIES}")
 
         payload = {
-            "model": MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -75,10 +80,12 @@ def generate_title(
             "temperature": 0.7,
             "max_tokens": 100,
         }
+        if model:
+            payload["model"] = model
 
         try:
             resp = requests.post(
-                NVIDIA_API_URL,
+                api_url,
                 headers=headers,
                 json=payload,
                 timeout=30,

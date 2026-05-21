@@ -5,6 +5,8 @@
     "username3"
   ],
   "nvidia_api_key": "nvapi-XXXXXXXXXXXXXXXXXXXXX",
+  "api_url": null,
+  "model": null,
   "youtube_client_secret": "client_secret.json",
   "whisper_model": "base",
   "check_interval_minutes": 5,
