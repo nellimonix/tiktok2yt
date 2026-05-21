@@ -49,7 +49,7 @@ nano config.json
 ```json
 {
   "tiktok_accounts": ["user1", "user2"],    // TikTok юзернеймы
-  "nvidia_api_key": "nvapi-...",            // Ключ NVIDIA API
+  "api_key": "nvapi-...",                   // Ключ LLM API
   "youtube_client_secret": "client_secret.json",
   "whisper_model": "base",                  // base / small / medium
   "check_interval_minutes": 5,              // Интервал проверки

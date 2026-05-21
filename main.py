@@ -116,7 +116,7 @@ def process_single_video(
         # 4. Генерация названия
         title = generate_title(
             transcript=transcript,
-            api_key=config["nvidia_api_key"],
+            api_key=config["api_key"],
             api_url=config.get("api_url"),
             model=config.get("model"),
             fallback_title=video_info.get("title", "Интересное видео")[:60],

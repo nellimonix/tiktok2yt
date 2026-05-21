@@ -4,7 +4,7 @@
     "username2",
     "username3"
   ],
-  "nvidia_api_key": "nvapi-XXXXXXXXXXXXXXXXXXXXX",
+  "api_key": "nvapi-XXXXXXXXXXXXXXXXXXXXX",
   "api_url": null,
   "model": null,
   "youtube_client_secret": "client_secret.json",
