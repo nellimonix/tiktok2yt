@@ -14,6 +14,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
 SYSTEM_PROMPT = """Ты генератор названий для YouTube Shorts.
 
@@ -58,6 +59,8 @@ def generate_title(
         logger.error("api_url не задан, используем fallback")
         return fallback_title
 
+    endpoint = api_url.rstrip("/") + CHAT_COMPLETIONS_PATH
+
     # Обрезаем транскрипцию если слишком длинная
     truncated = transcript[:1500]
 
@@ -85,7 +88,7 @@ def generate_title(
 
         try:
             resp = requests.post(
-                api_url,
+                endpoint,
                 headers=headers,
                 json=payload,
                 timeout=30,
