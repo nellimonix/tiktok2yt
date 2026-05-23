@@ -10,6 +10,7 @@ TikTok → YouTube Shorts переливер.
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -58,6 +59,17 @@ def setup_logging(log_file: str) -> None:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_fallback_title(raw: str, default: str = "Интересное видео") -> str:
+    """Чистит TikTok title от хештегов/мусора для использования как fallback."""
+    if not raw:
+        return default
+    cleaned = re.sub(r"#\S+", "", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—_.,:;|")
+    if len(cleaned) < 3:
+        return default
+    return cleaned[:60]
 
 
 # ─────────────────────────────────────────────
@@ -120,7 +132,7 @@ def process_single_video(
             api_key=config["api_key"],
             api_url=config.get("api_url"),
             model=config.get("model"),
-            fallback_title=video_info.get("title", "Интересное видео")[:60],
+            fallback_title=_clean_fallback_title(video_info.get("title", "")),
         )
         logger.info(f"Название: {title}")
 

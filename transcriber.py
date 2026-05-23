@@ -8,6 +8,8 @@ import os
 import subprocess
 from typing import Optional
 
+from monitor import has_audio_stream
+
 logger = logging.getLogger(__name__)
 
 # Глобальная модель (загружается один раз)
@@ -58,34 +60,34 @@ def extract_audio(video_path: str, audio_path: str) -> Optional[str]:
 def transcribe(video_path: str, model_size: str = "base") -> str:
     """
     Транскрибирует видео.
-    Возвращает текст или пустую строку если не удалось.
+    Возвращает текст или пустую строку если не удалось/нет звука.
     """
+    if not has_audio_stream(video_path):
+        logger.info("В видео нет аудиодорожки — пропускаем транскрипцию")
+        return ""
+
     audio_path = video_path + ".wav"
     try:
         extracted = extract_audio(video_path, audio_path)
         if not extracted:
-            logger.warning("Не удалось извлечь аудио, пробуем напрямую")
-            audio_path = video_path  # Попробуем подать видео напрямую
+            logger.warning("Не удалось извлечь аудио — пропускаем транскрипцию")
+            return ""
 
         model = _get_model(model_size)
         segments, info = model.transcribe(
-            audio_path,
+            extracted,
             beam_size=5,
             language=None,  # Авто-определение языка
             vad_filter=True,
         )
 
-        text_parts = []
-        for segment in segments:
-            text_parts.append(segment.text.strip())
-
-        full_text = " ".join(text_parts)
+        text_parts = [segment.text.strip() for segment in segments]
+        full_text = " ".join(text_parts).strip()
         logger.info(
             f"Транскрипция: язык={info.language} "
             f"вероятность={info.language_probability:.2f} "
             f"длина={len(full_text)} символов"
         )
-
         return full_text
 
     except Exception as e:
@@ -93,7 +95,5 @@ def transcribe(video_path: str, model_size: str = "base") -> str:
         return ""
 
     finally:
-        # Удаляем временный аудио файл
-        temp_audio = video_path + ".wav"
-        if os.path.exists(temp_audio):
-            os.remove(temp_audio)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)

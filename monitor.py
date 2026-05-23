@@ -12,6 +12,24 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def has_audio_stream(video_path: str) -> bool:
+    """Проверяет наличие хотя бы одной аудиодорожки через ffprobe."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=codec_type",
+        "-of", "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        data = json.loads(result.stdout or "{}")
+        return bool(data.get("streams"))
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        return True  # неизвестно — пусть дальнейшая логика решает
+
+
 _SEC_UID_ERROR = "Unable to extract secondary user ID"
 
 
@@ -99,21 +117,15 @@ def get_video_list(
     return []
 
 
-def download_video(video_url: str, output_path: str) -> Optional[str]:
-    """
-    Скачивает видео без водяного знака TikTok.
-    Возвращает путь к скачанному файлу или None.
-    """
+def _yt_dlp_download(video_url: str, output_path: str, fmt: str) -> Optional[str]:
     cmd = [
         "yt-dlp",
-        "-f", "best",
+        "-f", fmt,
         "-o", output_path,
         "--no-warnings",
         "--merge-output-format", "mp4",
         video_url,
     ]
-    logger.info(f"Скачиваем: {video_url}")
-
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
@@ -123,19 +135,53 @@ def download_video(video_url: str, output_path: str) -> Optional[str]:
         logger.error(f"Таймаут при скачивании: {video_url}")
         return None
 
-    # yt-dlp может добавить расширение
-    for ext in ["", ".mp4", ".webm"]:
-        candidate = output_path + ext if not output_path.endswith(ext) else output_path
-        if os.path.exists(candidate):
-            logger.info(f"Скачано: {candidate}")
-            return candidate
-
-    # Проверяем без расширения (yt-dlp мог подставить)
+    candidates = [output_path]
     base = os.path.splitext(output_path)[0]
     for ext in [".mp4", ".webm", ".mkv"]:
-        candidate = base + ext
-        if os.path.exists(candidate):
-            return candidate
+        candidates.append(output_path + ext)
+        candidates.append(base + ext)
+    for path in candidates:
+        if os.path.exists(path):
+            return path
 
     logger.error(f"Файл не найден после скачивания: {output_path}")
+    return None
+
+
+def _cleanup_partial(output_path: str) -> None:
+    base = os.path.splitext(output_path)[0]
+    for path in [output_path] + [base + ext for ext in [".mp4", ".webm", ".mkv", ".part"]]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def download_video(video_url: str, output_path: str) -> Optional[str]:
+    """
+    Скачивает видео без водяного знака TikTok.
+    Проверяет наличие аудиодорожки; при её отсутствии — одна повторная попытка
+    с принудительным merge видео+аудио. Если аудио так и нет — None (пропуск).
+    """
+    attempts = [
+        ("best", "первая попытка"),
+        ("bv*+ba/b", "повтор с принудительным merge видео+аудио"),
+    ]
+
+    for fmt, label in attempts:
+        logger.info(f"Скачиваем ({label}): {video_url}")
+        path = _yt_dlp_download(video_url, output_path, fmt)
+        if not path:
+            _cleanup_partial(output_path)
+            continue
+
+        if has_audio_stream(path):
+            logger.info(f"Скачано: {path}")
+            return path
+
+        logger.warning(f"Скачано без аудио: {path} — пробуем другой формат")
+        _cleanup_partial(output_path)
+
+    logger.error(f"Не удалось получить видео с аудио: {video_url} — пропуск")
     return None
