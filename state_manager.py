@@ -19,6 +19,7 @@ def _default_state() -> dict:
         "processed_videos": [],
         "scheduled_queue": [],
         "last_check": {},
+        "channel_ids": {},
     }
 
 
@@ -55,4 +56,18 @@ def is_first_run(state: dict) -> bool:
 
 def mark_first_run_done(state: dict) -> None:
     state["first_run_done"] = True
+    save_state(state)
+
+
+def get_channel_id(state: dict, username: str) -> str:
+    return state.get("channel_ids", {}).get(username, "") or ""
+
+
+def set_channel_id(state: dict, username: str, channel_id: str) -> None:
+    if not channel_id:
+        return
+    ids = state.setdefault("channel_ids", {})
+    if ids.get(username) == channel_id:
+        return
+    ids[username] = channel_id
     save_state(state)

@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from state_manager import (
     load_state, save_state, is_processed,
     mark_processed, is_first_run, mark_first_run_done,
+    get_channel_id, set_channel_id,
 )
 from monitor import get_video_list, download_video
 from video_processor import process_video
@@ -179,7 +180,16 @@ def first_run(config: dict, state: dict, youtube_service) -> None:
     all_videos = []
 
     for username in accounts:
-        videos = get_video_list(username, max_count=per_account)
+        videos = get_video_list(
+            username,
+            max_count=per_account,
+            channel_id=get_channel_id(state, username),
+        )
+        for v in videos:
+            cid = v.get("channel_id")
+            if cid:
+                set_channel_id(state, username, cid)
+                break
         for v in videos:
             if not is_processed(state, v["id"]):
                 all_videos.append(v)
@@ -246,7 +256,17 @@ def monitoring_loop(config: dict, state: dict, youtube_service) -> None:
                 logger.info(f"\nПроверяем @{username}...")
 
                 # Берём последние 5 видео
-                videos = get_video_list(username, max_count=5)
+                videos = get_video_list(
+                    username,
+                    max_count=5,
+                    channel_id=get_channel_id(state, username),
+                )
+
+                for v in videos:
+                    cid = v.get("channel_id")
+                    if cid:
+                        set_channel_id(state, username, cid)
+                        break
 
                 new_count = 0
                 for video in videos:
