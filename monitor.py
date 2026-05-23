@@ -117,15 +117,23 @@ def get_video_list(
     return []
 
 
-def _yt_dlp_download(video_url: str, output_path: str, fmt: str) -> Optional[str]:
+def _yt_dlp_download(
+    video_url: str,
+    output_path: str,
+    fmt: Optional[str] = None,
+    sort: Optional[str] = None,
+) -> Optional[str]:
     cmd = [
         "yt-dlp",
-        "-f", fmt,
         "-o", output_path,
         "--no-warnings",
         "--merge-output-format", "mp4",
-        video_url,
     ]
+    if fmt:
+        cmd.extend(["-f", fmt])
+    if sort:
+        cmd.extend(["-S", sort])
+    cmd.append(video_url)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
@@ -161,17 +169,24 @@ def _cleanup_partial(output_path: str) -> None:
 def download_video(video_url: str, output_path: str) -> Optional[str]:
     """
     Скачивает видео без водяного знака TikTok.
-    Проверяет наличие аудиодорожки; при её отсутствии — одна повторная попытка
-    с принудительным merge видео+аудио. Если аудио так и нет — None (пропуск).
+
+    TikTok отдаёт h265 (bytevc1) потоки видео-only, но yt-dlp ошибочно метит их
+    acodec=aac. Поэтому без явного предпочтения h264 -f best может выбрать h265
+    и файл будет без звука. Сначала пробуем sort vcodec:h264, потом форс-merge.
     """
     attempts = [
-        ("best", "первая попытка"),
-        ("bv*+ba/b", "повтор с принудительным merge видео+аудио"),
+        {"sort": "vcodec:h264", "label": "первая попытка (h264 prefer)"},
+        {"fmt": "bv*+ba/b", "label": "повтор с принудительным merge видео+аудио"},
     ]
 
-    for fmt, label in attempts:
-        logger.info(f"Скачиваем ({label}): {video_url}")
-        path = _yt_dlp_download(video_url, output_path, fmt)
+    for attempt in attempts:
+        logger.info(f"Скачиваем ({attempt['label']}): {video_url}")
+        path = _yt_dlp_download(
+            video_url,
+            output_path,
+            fmt=attempt.get("fmt"),
+            sort=attempt.get("sort"),
+        )
         if not path:
             _cleanup_partial(output_path)
             continue
