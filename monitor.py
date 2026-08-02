@@ -1,19 +1,25 @@
-"""
-Модуль мониторинга TikTok аккаунтов.
-Получает список видео, скачивает новые.
-"""
+"""Получение и скачивание видео TikTok через yt-dlp."""
 
 import json
 import logging
 import os
 import subprocess
+import sys
 from typing import Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
 
+class VideoListError(RuntimeError):
+    pass
+
+
+def _yt_dlp_command() -> list[str]:
+    return [sys.executable, "-m", "yt_dlp"]
+
+
 def has_audio_stream(video_path: str) -> bool:
-    """Проверяет наличие хотя бы одной аудиодорожки через ffprobe."""
     cmd = [
         "ffprobe",
         "-v", "error",
@@ -27,18 +33,25 @@ def has_audio_stream(video_path: str) -> bool:
         data = json.loads(result.stdout or "{}")
         return bool(data.get("streams"))
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
-        return True  # неизвестно — пусть дальнейшая логика решает
+        return True
 
 
-_SEC_UID_ERROR = "Unable to extract secondary user ID"
+def _profile_url(username: str) -> str:
+    normalized = username.strip().lstrip("@")
+    return f"https://www.tiktok.com/@{quote(normalized, safe='._-')}"
+
+
+def _video_url(username: str, video_id: str) -> str:
+    return f"{_profile_url(username)}/video/{video_id}"
 
 
 def _run_yt_dlp_list(source_url: str, max_count: int) -> tuple[int, str, str]:
-    cmd = [
-        "yt-dlp",
+    cmd = _yt_dlp_command() + [
         "--flat-playlist",
         "--playlist-end", str(max_count),
-        "--print", "%(id)s|||%(title)s|||%(duration)s|||%(webpage_url)s|||%(channel_id)s",
+        "--dump-json",
+        "--impersonate", "chrome",
+        "--extractor-retries", "3",
         "--no-warnings",
         source_url,
     ]
@@ -48,25 +61,29 @@ def _run_yt_dlp_list(source_url: str, max_count: int) -> tuple[int, str, str]:
 
 def _parse_videos(stdout: str, username: str) -> list[dict]:
     videos = []
-    for line in stdout.strip().split("\n"):
+    for line in stdout.splitlines():
         if not line.strip():
             continue
-        parts = line.split("|||")
-        if len(parts) < 4:
-            continue
-        vid_id, title, duration_str, vid_url = parts[:4]
-        channel_id = parts[4].strip() if len(parts) >= 5 else ""
         try:
-            duration = float(duration_str) if duration_str != "NA" else 0
-        except ValueError:
+            item = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise VideoListError(f"yt-dlp returned invalid JSON: {error}") from error
+        video_id = str(item.get("id") or "").strip()
+        if not video_id:
+            continue
+        duration = item.get("duration") or 0
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
             duration = 0
+        channel_id = str(item.get("channel_id") or "").strip()
         videos.append({
-            "id": vid_id.strip(),
-            "title": title.strip(),
+            "id": video_id,
+            "title": str(item.get("title") or "").strip(),
             "duration": duration,
-            "url": vid_url.strip(),
-            "username": username,
-            "channel_id": channel_id if channel_id and channel_id != "NA" else "",
+            "url": _video_url(username, video_id),
+            "username": username.strip().lstrip("@"),
+            "channel_id": channel_id,
         })
     return videos
 
@@ -76,45 +93,23 @@ def get_video_list(
     max_count: int = 10,
     channel_id: Optional[str] = None,
 ) -> list[dict]:
-    """
-    Получает список последних видео аккаунта.
-    Если задан channel_id (secUid), использует форму tiktokuser:<secUid> —
-    обход бага yt-dlp "Unable to extract secondary user ID" на profile URL.
-    Возвращает список словарей: {id, url, title, duration, username, channel_id}
-    """
-    logger.info(f"Получаем список видео @{username} (макс. {max_count})")
+    normalized = username.strip().lstrip("@")
+    source_url = _profile_url(normalized)
+    logger.info("Получаем список видео @%s (макс. %s)", normalized, max_count)
+    try:
+        return_code, stdout, stderr = _run_yt_dlp_list(source_url, max_count)
+    except subprocess.TimeoutExpired as error:
+        raise VideoListError(
+            f"Timeout while fetching TikTok profile @{normalized}"
+        ) from error
 
-    attempts: list[tuple[str, str]] = []
-    if channel_id:
-        attempts.append((f"tiktokuser:{channel_id}", "channel_id"))
-    attempts.append((f"https://www.tiktok.com/@{username}", "username"))
+    if return_code != 0:
+        message = stderr.strip() or f"yt-dlp exited with code {return_code}"
+        raise VideoListError(f"TikTok profile @{normalized}: {message}")
 
-    last_stderr = ""
-    for source_url, mode in attempts:
-        try:
-            rc, stdout, stderr = _run_yt_dlp_list(source_url, max_count)
-        except subprocess.TimeoutExpired:
-            logger.error(f"Таймаут при получении списка @{username} ({mode})")
-            continue
-
-        if rc == 0:
-            videos = _parse_videos(stdout, username)
-            logger.info(f"Найдено {len(videos)} видео у @{username} ({mode})")
-            return videos
-
-        last_stderr = stderr
-        if mode == "username" and _SEC_UID_ERROR in stderr:
-            logger.warning(
-                f"yt-dlp не смог извлечь secUid для @{username} по profile URL. "
-                f"Добавьте channel_id в state.json[\"channel_ids\"][\"{username}\"] "
-                f"для использования формы tiktokuser:<secUid>."
-            )
-        else:
-            logger.error(f"yt-dlp ошибка для @{username} ({mode}): {stderr}")
-
-    if last_stderr and _SEC_UID_ERROR not in last_stderr:
-        logger.error(f"Не удалось получить список @{username}: {last_stderr}")
-    return []
+    videos = _parse_videos(stdout, normalized)
+    logger.info("Найдено %s видео у @%s", len(videos), normalized)
+    return videos
 
 
 def _yt_dlp_download(
@@ -123,11 +118,13 @@ def _yt_dlp_download(
     fmt: Optional[str] = None,
     sort: Optional[str] = None,
 ) -> Optional[str]:
-    cmd = [
-        "yt-dlp",
+    cmd = _yt_dlp_command() + [
         "-o", output_path,
         "--no-warnings",
         "--merge-output-format", "mp4",
+        "--impersonate", "chrome",
+        "--extractor-retries", "3",
+        "--retries", "3",
     ]
     if fmt:
         cmd.extend(["-f", fmt])
@@ -137,28 +134,31 @@ def _yt_dlp_download(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            logger.error(f"Ошибка скачивания: {result.stderr}")
+            logger.error("Ошибка скачивания: %s", result.stderr.strip())
             return None
     except subprocess.TimeoutExpired:
-        logger.error(f"Таймаут при скачивании: {video_url}")
+        logger.error("Таймаут при скачивании: %s", video_url)
         return None
 
     candidates = [output_path]
     base = os.path.splitext(output_path)[0]
-    for ext in [".mp4", ".webm", ".mkv"]:
-        candidates.append(output_path + ext)
-        candidates.append(base + ext)
+    for extension in [".mp4", ".webm", ".mkv"]:
+        candidates.append(output_path + extension)
+        candidates.append(base + extension)
     for path in candidates:
         if os.path.exists(path):
             return path
 
-    logger.error(f"Файл не найден после скачивания: {output_path}")
+    logger.error("Файл не найден после скачивания: %s", output_path)
     return None
 
 
 def _cleanup_partial(output_path: str) -> None:
     base = os.path.splitext(output_path)[0]
-    for path in [output_path] + [base + ext for ext in [".mp4", ".webm", ".mkv", ".part"]]:
+    paths = [output_path] + [
+        base + extension for extension in [".mp4", ".webm", ".mkv", ".part"]
+    ]
+    for path in paths:
         if os.path.exists(path):
             try:
                 os.remove(path)
@@ -167,20 +167,13 @@ def _cleanup_partial(output_path: str) -> None:
 
 
 def download_video(video_url: str, output_path: str) -> Optional[str]:
-    """
-    Скачивает видео без водяного знака TikTok.
-
-    TikTok отдаёт h265 (bytevc1) потоки видео-only, но yt-dlp ошибочно метит их
-    acodec=aac. Поэтому без явного предпочтения h264 -f best может выбрать h265
-    и файл будет без звука. Сначала пробуем sort vcodec:h264, потом форс-merge.
-    """
     attempts = [
-        {"sort": "vcodec:h264", "label": "первая попытка (h264 prefer)"},
-        {"fmt": "bv*+ba/b", "label": "повтор с принудительным merge видео+аудио"},
+        {"sort": "vcodec:h264", "label": "h264 prefer"},
+        {"fmt": "bv*+ba/b", "label": "video+audio merge"},
     ]
 
     for attempt in attempts:
-        logger.info(f"Скачиваем ({attempt['label']}): {video_url}")
+        logger.info("Скачиваем (%s): %s", attempt["label"], video_url)
         path = _yt_dlp_download(
             video_url,
             output_path,
@@ -190,13 +183,11 @@ def download_video(video_url: str, output_path: str) -> Optional[str]:
         if not path:
             _cleanup_partial(output_path)
             continue
-
         if has_audio_stream(path):
-            logger.info(f"Скачано: {path}")
+            logger.info("Скачано: %s", path)
             return path
-
-        logger.warning(f"Скачано без аудио: {path} — пробуем другой формат")
+        logger.warning("Скачано без аудио: %s", path)
         _cleanup_partial(output_path)
 
-    logger.error(f"Не удалось получить видео с аудио: {video_url} — пропуск")
+    logger.error("Не удалось получить видео с аудио: %s", video_url)
     return None

@@ -57,10 +57,10 @@ def extract_audio(video_path: str, audio_path: str) -> Optional[str]:
     return None
 
 
-def transcribe(video_path: str, model_size: str = "base") -> str:
+def transcribe(video_path: str, model_size: str = "base") -> Optional[str]:
     """
     Транскрибирует видео.
-    Возвращает текст или пустую строку если не удалось/нет звука.
+    Возвращает текст, пустую строку для видео без звука или None при ошибке.
     """
     if not has_audio_stream(video_path):
         logger.info("В видео нет аудиодорожки — пропускаем транскрипцию")
@@ -70,8 +70,8 @@ def transcribe(video_path: str, model_size: str = "base") -> str:
     try:
         extracted = extract_audio(video_path, audio_path)
         if not extracted:
-            logger.warning("Не удалось извлечь аудио — пропускаем транскрипцию")
-            return ""
+            logger.error("Не удалось извлечь аудио")
+            return None
 
         model = _get_model(model_size)
         segments, info = model.transcribe(
@@ -92,7 +92,7 @@ def transcribe(video_path: str, model_size: str = "base") -> str:
 
     except Exception as e:
         logger.error(f"Ошибка транскрипции: {e}")
-        return ""
+        return None
 
     finally:
         if os.path.exists(audio_path):

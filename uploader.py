@@ -9,6 +9,7 @@
 import json
 import logging
 import os
+import re
 import time
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,11 @@ TOKEN_FILE = "youtube_token.json"
 # 10 = Music
 # ... и т.д.
 CATEGORY_FILM_ANIMATION = "1"
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def is_valid_youtube_video_id(video_id: object) -> bool:
+    return bool(YOUTUBE_VIDEO_ID_RE.fullmatch(str(video_id or "")))
 
 
 def get_youtube_service(client_secret_file: str):
@@ -184,7 +190,10 @@ def upload_video(
 
         response = _resumable_upload(request)
         if response:
-            video_id = response["id"]
+            video_id = response.get("id")
+            if not is_valid_youtube_video_id(video_id):
+                logger.error("YouTube API вернул некорректный ID видео")
+                return None
             logger.info(
                 f"Видео загружено! ID: {video_id} "
                 f"URL: https://youtube.com/shorts/{video_id}"

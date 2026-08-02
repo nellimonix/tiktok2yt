@@ -1,50 +1,65 @@
 #!/usr/bin/env python3
-"""
-TikTok → YouTube Shorts переливер.
+"""TikTok → YouTube Shorts."""
 
-Главный оркестратор:
-- Первый запуск: забирает N видео с каждого аккаунта, ставит в отложку
-- Далее: мониторит аккаунты, обрабатывает новые видео
-"""
-
+import argparse
 import json
 import logging
 import os
 import re
-import shutil
 import sys
 import time
-from datetime import datetime, timezone
 
-from state_manager import (
-    load_state, save_state, is_processed,
-    mark_processed, is_first_run, mark_first_run_done,
-    get_channel_id, set_channel_id,
-)
-from monitor import get_video_list, download_video
-from video_processor import process_video
-from transcriber import transcribe
 from ai_title import generate_title
-from uploader import (
-    get_youtube_service, upload_video, calculate_schedule_times,
+from monitor import VideoListError, download_video, get_video_list
+from state_manager import (
+    get_channel_id,
+    is_first_run,
+    is_processed,
+    load_state,
+    mark_first_run_done,
+    mark_found,
+    mark_stage,
+    mark_uploaded,
+    record_failure,
+    recover_interrupted,
+    remove_failure,
+    set_channel_id,
 )
-
-# ─────────────────────────────────────────────
-# Настройки
-# ─────────────────────────────────────────────
+from transcriber import transcribe
+from uploader import (
+    calculate_schedule_times,
+    get_youtube_service,
+    is_valid_youtube_video_id,
+    upload_video,
+)
+from video_processor import process_video
 
 CONFIG_FILE = "config.json"
+
+STAGE_DISCOVERY = "discovery"
+STAGE_DOWNLOAD = "download"
+STAGE_PROCESSING = "processing"
+STAGE_TRANSCRIPTION = "transcription"
+STAGE_TITLE = "title_generation"
+STAGE_UPLOAD = "youtube_upload"
+
+logger = logging.getLogger(__name__)
+
+
+class PipelineError(RuntimeError):
+    def __init__(self, stage: str, message: str, local_file_path: str = ""):
+        super().__init__(message)
+        self.stage = stage
+        self.local_file_path = local_file_path
 
 
 def load_config() -> dict:
     if not os.path.exists(CONFIG_FILE):
-        print(
-            f"ОШИБКА: {CONFIG_FILE} не найден!\n"
-            f"Скопируйте config.example.json → config.json и заполните."
+        raise FileNotFoundError(
+            f"{CONFIG_FILE} не найден. Скопируйте config.example.json и заполните его."
         )
-        sys.exit(1)
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def setup_logging(log_file: str) -> None:
@@ -55,14 +70,11 @@ def setup_logging(log_file: str) -> None:
             logging.FileHandler(log_file, encoding="utf-8"),
             logging.StreamHandler(sys.stdout),
         ],
+        force=True,
     )
 
 
-logger = logging.getLogger(__name__)
-
-
 def _clean_fallback_title(raw: str, default: str = "Интересное видео") -> str:
-    """Чистит TikTok title от хештегов/мусора для использования как fallback."""
     if not raw:
         return default
     cleaned = re.sub(r"#\S+", "", raw)
@@ -72,285 +84,317 @@ def _clean_fallback_title(raw: str, default: str = "Интересное вид�
     return cleaned[:60]
 
 
-# ─────────────────────────────────────────────
-# Пайплайн обработки одного видео
-# ─────────────────────────────────────────────
+def _existing_retry_file(failure: dict, stage: str) -> tuple[str, str]:
+    saved_path = failure.get("local_file_path", "") if failure else ""
+    if not saved_path or not os.path.exists(saved_path):
+        return "", ""
+    if stage in {STAGE_TRANSCRIPTION, STAGE_TITLE, STAGE_UPLOAD}:
+        return "", saved_path
+    return saved_path, ""
+
+
+def _cleanup_success_files(video_id: str, tmp_dir: str, paths: set[str]) -> None:
+    base = os.path.join(tmp_dir, f"{video_id}_raw")
+    paths.update(base + extension for extension in [".mp4", ".webm", ".mkv", ".part"])
+    for path in paths:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as error:
+                logger.warning("Не удалось удалить временный файл %s: %s", path, error)
+
 
 def process_single_video(
     video_info: dict,
     config: dict,
     youtube_service,
+    state: dict,
     publish_at=None,
+    retry_failure: dict | None = None,
 ) -> bool:
-    """
-    Полный пайплайн для одного видео:
-    скачать → обработать → транскрибировать → название → загрузить
+    video_id = str(video_info["id"])
+    if is_processed(state, video_id):
+        remove_failure(state, video_id)
+        return True
 
-    Returns:
-        True если всё успешно
-    """
-    vid_id = video_info["id"]
     tmp_dir = config.get("temp_dir", "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
+    raw_target = os.path.join(tmp_dir, f"{video_id}_raw.mp4")
+    processed_target = os.path.join(tmp_dir, f"{video_id}_final.mp4")
+    retry_stage = retry_failure.get("stage", "") if retry_failure else ""
+    raw_path, processed_path = _existing_retry_file(retry_failure or {}, retry_stage)
+    current_stage = STAGE_DOWNLOAD
 
-    raw_path = os.path.join(tmp_dir, f"{vid_id}_raw.mp4")
-    processed_path = os.path.join(tmp_dir, f"{vid_id}_final.mp4")
+    mark_found(state, video_info)
+    logger.info("Обработка видео %s (@%s)", video_id, video_info.get("username", "?"))
 
     try:
-        # 1. Скачивание
-        logger.info(f"{'='*50}")
-        logger.info(f"Обработка видео: {vid_id} (@{video_info.get('username', '?')})")
+        if not raw_path and not processed_path:
+            current_stage = STAGE_DOWNLOAD
+            mark_stage(state, video_info, current_stage)
+            raw_path = download_video(video_info["url"], raw_target)
+            if not raw_path:
+                raise PipelineError(current_stage, "yt-dlp did not download the video")
 
-        downloaded = download_video(video_info["url"], raw_path)
-        if not downloaded:
-            logger.error(f"Не удалось скачать: {vid_id}")
-            return False
+        if not processed_path:
+            current_stage = STAGE_PROCESSING
+            mark_stage(state, video_info, current_stage, raw_path)
+            processed_path = process_video(
+                input_path=raw_path,
+                output_path=processed_target,
+                overlay_text=config.get("overlay_text", "Лимонный чай"),
+                font_size=config.get("overlay_font_size", 52),
+                opacity=config.get("overlay_opacity", 0.5),
+                max_duration=config.get("max_duration_seconds", 179),
+            )
+            if not processed_path:
+                raise PipelineError(
+                    current_stage,
+                    "ffmpeg did not produce the processed video",
+                    raw_path,
+                )
 
-        # 2. Обработка (текст + обрезка)
-        processed = process_video(
-            input_path=downloaded,
-            output_path=processed_path,
-            overlay_text=config.get("overlay_text", "Лимонный чай"),
-            font_size=config.get("overlay_font_size", 52),
-            opacity=config.get("overlay_opacity", 0.5),
-            max_duration=config.get("max_duration_seconds", 179),
-        )
-        if not processed:
-            logger.error(f"Не удалось обработать: {vid_id}")
-            return False
-
-        # 3. Транскрипция
+        current_stage = STAGE_TRANSCRIPTION
+        mark_stage(state, video_info, current_stage, processed_path)
         transcript = transcribe(
-            processed,
+            processed_path,
             model_size=config.get("whisper_model", "base"),
         )
-        logger.info(f"Транскрипция ({len(transcript)} символов): {transcript[:100]}...")
+        if transcript is None:
+            raise PipelineError(
+                current_stage,
+                "Transcription failed",
+                processed_path,
+            )
 
-        # 4. Генерация названия
+        current_stage = STAGE_TITLE
+        mark_stage(state, video_info, current_stage, processed_path)
         title = generate_title(
             transcript=transcript,
             api_key=config["api_key"],
             api_url=config.get("api_url"),
             model=config.get("model"),
             fallback_title=_clean_fallback_title(video_info.get("title", "")),
+            raise_on_failure=True,
         )
-        logger.info(f"Название: {title}")
 
-        # 5. Загрузка на YouTube
-        description = f"#shorts"
-        video_id = upload_video(
+        current_stage = STAGE_UPLOAD
+        mark_stage(state, video_info, current_stage, processed_path)
+        youtube_id = upload_video(
             youtube_service=youtube_service,
-            video_path=processed,
+            video_path=processed_path,
             title=title,
-            description=description,
+            description="#shorts",
             category_id=config.get("youtube_category_id", "1"),
             publish_at=publish_at,
             tags=["shorts"],
         )
-
-        if video_id:
-            schedule_info = (
-                f"(отложка: {publish_at.strftime('%Y-%m-%d %H:%M UTC')})"
-                if publish_at else "(сразу)"
+        if not is_valid_youtube_video_id(youtube_id):
+            raise PipelineError(
+                current_stage,
+                "YouTube did not return a valid video ID",
+                processed_path,
             )
-            logger.info(f"УСПЕХ! YouTube ID: {video_id} {schedule_info}")
-            return True
-        else:
-            logger.error(f"Не удалось загрузить на YouTube: {vid_id}")
-            return False
 
-    finally:
-        # Очистка временных файлов
-        for f in [raw_path, processed_path]:
-            if os.path.exists(f):
-                os.remove(f)
-        # Также убираем файлы которые yt-dlp мог создать с другим расширением
-        for ext in [".mp4", ".webm", ".mkv", ".part"]:
-            candidate = os.path.join(tmp_dir, f"{vid_id}_raw{ext}")
-            if os.path.exists(candidate):
-                os.remove(candidate)
+        mark_uploaded(state, video_info, youtube_id)
+        _cleanup_success_files(
+            video_id,
+            tmp_dir,
+            {raw_path, processed_path, raw_target, processed_target},
+        )
+        logger.info("УСПЕХ! TikTok ID: %s, YouTube ID: %s", video_id, youtube_id)
+        return True
+
+    except PipelineError as error:
+        local_path = error.local_file_path
+        if not local_path:
+            local_path = processed_path if processed_path and os.path.exists(processed_path) else raw_path
+        record_failure(
+            state,
+            video_info,
+            error.stage,
+            str(error),
+            os.path.normpath(local_path) if local_path else "",
+        )
+        logger.error("Видео %s: этап %s: %s", video_id, error.stage, error)
+        return False
+    except Exception as error:
+        local_path = processed_path if processed_path and os.path.exists(processed_path) else raw_path
+        record_failure(
+            state,
+            video_info,
+            current_stage,
+            f"{type(error).__name__}: {error}",
+            os.path.normpath(local_path) if local_path else "",
+        )
+        logger.exception("Видео %s: этап %s", video_id, current_stage)
+        return False
 
 
-# ─────────────────────────────────────────────
-# Первый запуск: набираем контент
-# ─────────────────────────────────────────────
+def _fetch_account_videos(username: str, count: int, state: dict) -> list[dict]:
+    videos = get_video_list(
+        username,
+        max_count=count,
+        channel_id=get_channel_id(state, username),
+    )
+    for video in videos:
+        channel_id = video.get("channel_id")
+        if channel_id:
+            set_channel_id(state, username, channel_id)
+            break
+    return videos
+
 
 def first_run(config: dict, state: dict, youtube_service) -> None:
-    """
-    Первый запуск:
-    - Забираем initial_videos_per_account видео с каждого аккаунта
-    - Первое публикуем сразу, остальные ставим в отложку через каждые 2 часа
-    """
-    logger.info("=" * 60)
-    logger.info("ПЕРВЫЙ ЗАПУСК — собираем начальный контент")
-    logger.info("=" * 60)
-
     accounts = config["tiktok_accounts"]
     per_account = config.get("initial_videos_per_account", 5)
-    interval_hours = config.get("schedule_interval_hours", 2)
-
     all_videos = []
+    profile_error = False
 
     for username in accounts:
-        videos = get_video_list(
-            username,
-            max_count=per_account,
-            channel_id=get_channel_id(state, username),
+        try:
+            videos = _fetch_account_videos(username, per_account, state)
+        except VideoListError as error:
+            profile_error = True
+            logger.error("Ошибка обнаружения видео @%s: %s", username, error)
+            continue
+        all_videos.extend(
+            video for video in videos
+            if not is_processed(state, video["id"])
         )
-        for v in videos:
-            cid = v.get("channel_id")
-            if cid:
-                set_channel_id(state, username, cid)
-                break
-        for v in videos:
-            if not is_processed(state, v["id"]):
-                all_videos.append(v)
 
-    if not all_videos:
-        logger.info("Нет новых видео для первого запуска")
-        mark_first_run_done(state)
-        return
-
-    logger.info(f"Найдено {len(all_videos)} видео для первого запуска")
-
-    # Рассчитываем расписание
     schedule = calculate_schedule_times(
         count=len(all_videos),
-        interval_hours=interval_hours,
+        interval_hours=config.get("schedule_interval_hours", 2),
         start_from_now=True,
     )
-
-    success_count = 0
-    for i, (video, pub_time) in enumerate(zip(all_videos, schedule)):
-        logger.info(f"\n--- Видео {i+1}/{len(all_videos)} ---")
-
-        ok = process_single_video(
-            video_info=video,
-            config=config,
-            youtube_service=youtube_service,
-            publish_at=pub_time,
-        )
-        if ok:
-            mark_processed(state, video["id"])
-            success_count += 1
-        else:
-            logger.warning(f"Пропускаем видео {video['id']}")
-            # Всё равно помечаем чтобы не пытаться снова
-            mark_processed(state, video["id"])
-
-        # Пауза между загрузками чтобы не нарваться на rate limit
-        if i < len(all_videos) - 1:
+    for index, (video, publish_at) in enumerate(zip(all_videos, schedule)):
+        process_single_video(video, config, youtube_service, state, publish_at)
+        if index < len(all_videos) - 1:
             time.sleep(5)
 
-    logger.info(f"\nПервый запуск завершён: {success_count}/{len(all_videos)} загружено")
-    mark_first_run_done(state)
+    if not profile_error:
+        mark_first_run_done(state)
 
-
-# ─────────────────────────────────────────────
-# Основной цикл мониторинга
-# ─────────────────────────────────────────────
 
 def monitoring_loop(config: dict, state: dict, youtube_service) -> None:
-    """
-    Бесконечный цикл: проверяем аккаунты, обрабатываем новые видео.
-    """
     interval = config.get("check_interval_minutes", 5) * 60
     accounts = config["tiktok_accounts"]
-
-    logger.info("=" * 60)
-    logger.info(f"Запущен мониторинг ({len(accounts)} аккаунтов)")
-    logger.info(f"Интервал проверки: {interval // 60} мин")
-    logger.info("=" * 60)
+    logger.info("Запущен мониторинг %s TikTok-аккаунтов", len(accounts))
 
     while True:
         try:
             for username in accounts:
-                logger.info(f"\nПроверяем @{username}...")
+                try:
+                    videos = _fetch_account_videos(username, 5, state)
+                except VideoListError as error:
+                    logger.error("Ошибка обнаружения видео @%s: %s", username, error)
+                    continue
 
-                # Берём последние 5 видео
-                videos = get_video_list(
-                    username,
-                    max_count=5,
-                    channel_id=get_channel_id(state, username),
-                )
-
-                for v in videos:
-                    cid = v.get("channel_id")
-                    if cid:
-                        set_channel_id(state, username, cid)
-                        break
-
-                new_count = 0
+                attempted = 0
                 for video in videos:
                     if is_processed(state, video["id"]):
                         continue
-
-                    logger.info(f"Новое видео: {video['id']} от @{username}")
-                    new_count += 1
-
-                    ok = process_single_video(
-                        video_info=video,
-                        config=config,
-                        youtube_service=youtube_service,
-                        publish_at=None,  # Новые видео публикуем сразу
-                    )
-                    mark_processed(state, video["id"])
-
-                    if ok:
-                        logger.info(f"Видео {video['id']} успешно обработано")
-                    else:
-                        logger.warning(f"Не удалось обработать {video['id']}")
-
+                    attempted += 1
+                    process_single_video(video, config, youtube_service, state)
                     time.sleep(3)
-
-                if new_count == 0:
-                    logger.info(f"@{username}: нет новых видео")
-
+                if attempted == 0:
+                    logger.info("@%s: нет новых видео", username)
         except KeyboardInterrupt:
-            logger.info("\nОстановка по Ctrl+C")
+            logger.info("Остановка по Ctrl+C")
             break
-        except Exception as e:
-            logger.error(f"Ошибка в цикле мониторинга: {e}", exc_info=True)
+        except Exception:
+            logger.exception("Ошибка в цикле мониторинга")
 
-        logger.info(f"\nСледующая проверка через {interval // 60} мин...")
+        logger.info("Следующая проверка через %s мин", interval // 60)
         try:
             time.sleep(interval)
         except KeyboardInterrupt:
-            logger.info("\nОстановка по Ctrl+C")
+            logger.info("Остановка по Ctrl+C")
             break
 
 
-# ─────────────────────────────────────────────
-# Точка входа
-# ─────────────────────────────────────────────
+def list_failed(state: dict) -> int:
+    failures = state.get("failed_videos", [])
+    if not failures:
+        print("Ошибочных видео нет.")
+        return 0
+    print(f"Ошибочных видео: {len(failures)}")
+    for failure in failures:
+        print(
+            f"{failure.get('tiktok_id')} | @{failure.get('account')} | "
+            f"{failure.get('stage')} | попыток: {failure.get('attempts')} | "
+            f"последняя: {failure.get('last_attempt_at')}"
+        )
+        print(f"  URL: {failure.get('url')}")
+        print(f"  Ошибка: {failure.get('error')}")
+        if failure.get("local_file_path"):
+            print(f"  Файл: {failure.get('local_file_path')}")
+    return len(failures)
 
-def main():
+
+def retry_failed(config: dict, state: dict, youtube_service) -> tuple[int, int]:
+    failures = [failure.copy() for failure in state.get("failed_videos", [])]
+    successful = 0
+    for failure in failures:
+        video_id = str(failure["tiktok_id"])
+        if is_processed(state, video_id):
+            remove_failure(state, video_id)
+            continue
+        video = {
+            "id": video_id,
+            "url": failure["url"],
+            "username": failure["account"],
+            "title": failure.get("title", ""),
+            "duration": failure.get("duration", 0),
+        }
+        if process_single_video(
+            video,
+            config,
+            youtube_service,
+            state,
+            retry_failure=failure,
+        ):
+            successful += 1
+    remaining = len(state.get("failed_videos", []))
+    logger.info("Повторная обработка: успешно %s, осталось ошибок %s", successful, remaining)
+    return successful, remaining
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="TikTok → YouTube Shorts")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--retry-failed", action="store_true")
+    modes.add_argument("--list-failed", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
     config = load_config()
     setup_logging(config.get("log_file", "bot.log"))
+    state = load_state()
+    interrupted = recover_interrupted(state)
+    if interrupted:
+        logger.warning("Восстановлено прерванных обработок: %s", interrupted)
 
-    logger.info("TikTok → YouTube Shorts переливер запущен")
+    if args.list_failed:
+        list_failed(state)
+        return 0
 
-    # Создаём временную директорию
     tmp_dir = config.get("temp_dir", "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
-
-    # Авторизация YouTube (при первом запуске откроет браузер)
-    logger.info("Авторизация YouTube...")
     youtube_service = get_youtube_service(config["youtube_client_secret"])
-    logger.info("YouTube авторизован!")
 
-    # Загружаем состояние
-    state = load_state()
+    if args.retry_failed:
+        _, remaining = retry_failed(config, state, youtube_service)
+        return 1 if remaining else 0
 
-    # Первый запуск?
     if is_first_run(state):
         first_run(config, state, youtube_service)
-    else:
-        logger.info("Первый запуск уже выполнен, переходим к мониторингу")
-
-    # Основной цикл
     monitoring_loop(config, state, youtube_service)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

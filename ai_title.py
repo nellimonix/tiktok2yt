@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
+
+class TitleGenerationError(RuntimeError):
+    pass
+
 SYSTEM_PROMPT = """Ты генератор названий для YouTube Shorts.
 
 ЗАДАЧА: придумай одно короткое название для видео.
@@ -42,6 +46,7 @@ def generate_title(
     api_url: str,
     model: Optional[str] = None,
     fallback_title: str = "Интересное видео",
+    raise_on_failure: bool = False,
 ) -> str:
     """
     Генерирует название для YouTube Shorts.
@@ -57,6 +62,8 @@ def generate_title(
 
     if not api_url:
         logger.error("api_url не задан, используем fallback")
+        if raise_on_failure:
+            raise TitleGenerationError("api_url is not configured")
         return fallback_title
 
     endpoint = api_url.rstrip("/") + CHAT_COMPLETIONS_PATH
@@ -114,6 +121,8 @@ def generate_title(
             time.sleep(1)
 
     logger.error("Все попытки генерации исчерпаны")
+    if raise_on_failure:
+        raise TitleGenerationError("Title generation failed after all retries")
     return fallback_title
 
 

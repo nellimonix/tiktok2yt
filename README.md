@@ -71,6 +71,17 @@ nano config.json
 python3 main.py
 ```
 
+Просмотр и повторная обработка ошибок:
+
+```bash
+./venv/bin/python main.py --list-failed
+./venv/bin/python main.py --retry-failed
+```
+
+`processed_videos` содержит только TikTok ID видео, для которых YouTube вернул
+корректный ID. Текущие этапы хранятся в `video_states`, ошибки — в
+`failed_videos`. Запись `state.json` выполняется атомарно.
+
 При первом запуске откроется браузер для авторизации YouTube.
 
 ## Запуск в фоне (systemd)

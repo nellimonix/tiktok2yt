@@ -12,7 +12,7 @@ sudo apt-get install -y -qq ffmpeg
 
 # Python зависимости
 echo "[2/3] Устанавливаем Python пакеты..."
-pip install -r requirements.txt
+python3 -m pip install --upgrade -r requirements.txt
 
 # Проверяем всё
 echo "[3/3] Проверяем установку..."
