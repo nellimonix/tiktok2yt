@@ -88,7 +88,8 @@ def generate_title(
                 },
             ],
             "temperature": 0.7,
-            "max_tokens": 100,
+            "max_tokens": 1024,
+            "response_format": {"type": "json_object"},
         }
         if model:
             payload["model"] = model
