@@ -26,7 +26,7 @@ def _get_model(model_size: str = "base"):
             model_size,
             device="cpu",
             compute_type="int8",
-            cpu_threads=4,
+            cpu_threads=1,
         )
         logger.info("Модель Whisper загружена")
     return _model
