@@ -21,9 +21,11 @@ echo -n "  ffmpeg: "
 ffmpeg -version 2>&1 | head -1
 
 echo -n "  yt-dlp: "
-yt-dlp --version
+python3 -m yt_dlp --version
+python3 -m yt_dlp --list-impersonate-targets
 
 python3 -c "from faster_whisper import WhisperModel; print('  faster-whisper: OK')"
+python3 -c "from PIL import Image; print('  Pillow: OK')"
 python3 -c "from googleapiclient.discovery import build; print('  google-api: OK')"
 
 echo ""

@@ -67,6 +67,15 @@ nano config.json
 
 ## Запуск
 
+Выходные видео имеют размер 1080×1920. Водяной знак рисуется через Pillow
+в прозрачный PNG и накладывается после масштабирования видео. Ширина надписи
+с подложкой ограничена 80% кадра; при необходимости размер шрифта уменьшается.
+Кириллица не проходит через `drawtext` FFmpeg.
+
+Для исходников 9:16 размытие фона пропускается. Для остальных оно считается
+на уменьшенном фоне 270×480. FFmpeg использует один поток декодирования,
+один поток фильтров и один поток кодирования с пресетом `veryfast`.
+
 ```bash
 python3 main.py
 ```
@@ -83,6 +92,33 @@ python3 main.py
 `failed_videos`. Запись `state.json` выполняется атомарно.
 
 При первом запуске откроется браузер для авторизации YouTube.
+
+## Ошибка TikTok `Unexpected response from webpage request`
+
+В зависимостях закреплены `yt-dlp==2026.8.19` с исправлением TikTok extractor
+и `curl-cffi==0.16.0`. Более новый `curl-cffi` может выбирать профиль Chrome 150,
+для которого [зарегистрирована блокировка TikTok](https://github.com/yt-dlp/yt-dlp/issues/17604).
+Исправление extractor описано в [yt-dlp #17403](https://github.com/yt-dlp/yt-dlp/issues/17403).
+
+Обновите зависимости тем Python, который указан в `ExecStart` сервиса.
+Для установки в `venv`:
+
+```bash
+./venv/bin/python -m pip install --upgrade -r requirements.txt
+./venv/bin/python -m yt_dlp --version
+./venv/bin/python -m yt_dlp --list-impersonate-targets
+```
+
+Проверить извлечение видео без загрузки на YouTube:
+
+```bash
+./venv/bin/python -m yt_dlp --ignore-config --verbose --simulate --impersonate chrome 'TIKTOK_VIDEO_URL'
+```
+
+После успешной проверки перезапустите сервис. Для повторной обработки
+сохранённых ошибок остановите сервис, выполните
+`./venv/bin/python main.py --retry-failed`, затем запустите сервис снова.
+Команда повторной обработки загружает готовые видео на YouTube.
 
 ## Запуск в фоне (systemd)
 
@@ -113,6 +149,19 @@ sudo systemctl enable tiktok2yt
 sudo systemctl start tiktok2yt
 sudo journalctl -u tiktok2yt -f   # логи
 ```
+
+На сервере с другими сервисами установите ограничение CPU:
+
+```bash
+sudo install -D -m 644 deploy/tiktok2yt-resources.conf /etc/systemd/system/tiktok2yt.service.d/resources.conf
+sudo systemctl daemon-reload
+sudo systemctl restart tiktok2yt
+```
+
+Лимит 70% относится к одному ядру и охватывает весь сервис вместе с дочерними
+процессами, включая FFmpeg и Whisper. На сервере с двумя ядрами это около 35%
+общей мощности CPU. Обработка ограничена доступным CPU-временем, поэтому
+длинные ролики могут занимать больше времени.
 
 ## Структура файлов
 
